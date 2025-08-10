@@ -8,10 +8,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 TOKEN = os.environ["TOKEN"]  # set in Render/ENV
 
 # Deep link to open Mini App inside Telegram
-APP_URL = os.environ.get("APP_URL", "https://t.me/bugman_bot/myapp")
+APP_URL = os.environ.get("APP_URL", "https://otar989.github.io/bugman-miniapp-/")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton(text="🎮 Играть", web_app=WebAppInfo(url=APP_URL))]]
+    kb = [[InlineKeyboardButton("🎮 Играть", web_app=WebAppInfo(url=APP_URL))]]
     await update.message.reply_text(
         "👾 Привет! Добро пожаловать в Bugman!\n\nЖми «Играть» — Mini App откроется внутри Telegram.",
         reply_markup=InlineKeyboardMarkup(kb)
