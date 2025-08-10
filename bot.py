@@ -6,13 +6,15 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 TOKEN = os.environ["TOKEN"]
-APP_URL = os.environ.get("APP_URL", "https://otar989.github.io/bugman-miniapp-/")
+
+# Ссылка на Mini App внутри Telegram
+APP_URL = "https://t.me/bugman_bot/myapp"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # КНОПКА WEB APP (откроется внутри Telegram)
+    # Кнопка, открывающая Mini App внутри Telegram
     kb = [[InlineKeyboardButton("🎮 Играть", web_app=WebAppInfo(url=APP_URL))]]
     await update.message.reply_text(
-        "👾 Привет! Добро пожаловать в Bugman!\n\nЖми кнопку ниже — игра откроется внутри Telegram:",
+        "👾 Привет! Добро пожаловать в Bugman!\n\nЖми кнопку ниже, чтобы играть прямо в Telegram:",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
