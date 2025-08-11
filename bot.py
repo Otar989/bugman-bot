@@ -3,7 +3,13 @@ import asyncio
 import logging
 
 from aiohttp import web
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import (
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    WebAppInfo,
+)
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ---------- Логи ----------
@@ -14,10 +20,8 @@ log = logging.getLogger("bugman")
 # В Render добавь переменные окружения: TOKEN (обяз.), APP_URL (опц.), MEDIA_URL (опц.)
 TOKEN = os.environ["TOKEN"]
 APP_URL = os.environ.get("APP_URL", "https://otar989.github.io/bugman-miniapp-/")
-MEDIA_URL = os.environ.get(
-    "MEDIA_URL",
-    "https://github.com/Otar989/bugman-bot/blob/main/bugman.gif?raw=true",
-)
+# По умолчанию используем локальный GIF, чтобы стартовое сообщение всегда отправлялось
+MEDIA_URL = os.environ.get("MEDIA_URL", "bugman.gif")
 
 # ---------- Telegram-handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -31,24 +35,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     message = update.effective_message
 
+    def _get_media():
+        return FSInputFile(MEDIA_URL) if os.path.exists(MEDIA_URL) else MEDIA_URL
+
     # Пытаемся как GIF, если не выйдет — как фото (например, в десктоп-клиенте)
     try:
+        media = _get_media()
         if message:
-            await message.reply_animation(animation=MEDIA_URL, caption=caption, reply_markup=markup)
+            await message.reply_animation(animation=media, caption=caption, reply_markup=markup)
         else:
-            await context.bot.send_animation(chat_id=chat_id, animation=MEDIA_URL, caption=caption, reply_markup=markup)
+            await context.bot.send_animation(
+                chat_id=chat_id,
+                animation=media,
+                caption=caption,
+                reply_markup=markup,
+            )
     except Exception:
         try:
+            media = _get_media()
             if message:
-                await message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
+                await message.reply_photo(photo=media, caption=caption, reply_markup=markup)
             else:
-                await context.bot.send_photo(chat_id=chat_id, photo=MEDIA_URL, caption=caption, reply_markup=markup)
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=media,
+                    caption=caption,
+                    reply_markup=markup,
+                )
         except Exception:
             # Если отправка медиа не удалась, хотя бы приветствуем текстом
             if message:
                 await message.reply_text(text=caption, reply_markup=markup)
             else:
-                await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup)
+                await context.bot.send_message(
+                    chat_id=chat_id, text=caption, reply_markup=markup
+                )
 
 # ---------- Aiohttp health ----------
 async def health(_: web.Request) -> web.Response:
