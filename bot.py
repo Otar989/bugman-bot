@@ -1,6 +1,6 @@
 import os
+import asyncio
 import logging
-import threading
 
 from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
@@ -11,7 +11,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("bugman")
 
 # ---------- Конфиг ----------
-TOKEN = os.environ["TOKEN"]  # Render → Environment → TOKEN
+# В Render добавь переменные окружения: TOKEN (обяз.), APP_URL (опц.), MEDIA_URL (опц.)
+TOKEN = os.environ["TOKEN"]
 APP_URL = os.environ.get("APP_URL", "https://otar989.github.io/bugman-miniapp-/")
 MEDIA_URL = os.environ.get(
     "MEDIA_URL",
@@ -22,33 +23,53 @@ MEDIA_URL = os.environ.get(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("🎮 Играть", web_app=WebAppInfo(url=APP_URL))]]
     markup = InlineKeyboardMarkup(kb)
-    caption = "👾 Привет! Добро пожаловать в Bugman!\n\nЖми «Играть» — Mini App откроется внутри Telegram."
+    caption = (
+        "👾 Привет! Добро пожаловать в Bugman!\n\n"
+        "Жми «Играть» — Mini App откроется внутри Telegram."
+    )
 
+    # Пытаемся как GIF, если не выйдет — как фото (например, в десктоп-клиенте)
     try:
         await update.message.reply_animation(animation=MEDIA_URL, caption=caption, reply_markup=markup)
     except Exception:
         await update.message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
 
-def run_bot():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    log.info("Telegram bot polling started")
-    # В отдельном потоке: не блокируем основной процесс с веб-сервером
-    app.run_polling(close_loop=False)
-
-# ---------- Мини-веб для Render ----------
+# ---------- Aiohttp health ----------
 async def health(_: web.Request) -> web.Response:
     return web.Response(text="Bugman bot is running ✅")
 
-def run_web():
-    port = int(os.environ.get("PORT", 8000))
+# ---------- Асинхронный main: бот + веб-сервер в одном event loop ----------
+async def main():
+    # --- Telegram Application ---
+    application = ApplicationBuilder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+
+    # Инициализируем и запускаем бота (polling) без run_polling, чтобы управлять циклом сами
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    log.info("Telegram bot polling started")
+
+    # --- Aiohttp server (для Render) ---
+    port = int(os.environ.get("PORT", 10000))
     app = web.Application()
     app.router.add_get("/", health)
-    web.run_app(app, host="0.0.0.0", port=port)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    log.info(f"Health endpoint started on 0.0.0.0:{port}")
+
+    # Держим процесс живым
+    try:
+        await asyncio.Event().wait()
+    finally:
+        # Корректная остановка
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
 
 if __name__ == "__main__":
-    # Стартуем бота в фоне (поток)
-    t = threading.Thread(target=run_bot, daemon=True)
-    t.start()
-    # Поднимаем веб-сервер (держит процесс живым на Render)
-    run_web()
+    # Один event loop, без потоков — надёжно для Python 3.13/asyncio
+    asyncio.run(main())
