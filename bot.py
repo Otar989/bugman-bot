@@ -32,7 +32,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_animation(animation=MEDIA_URL, caption=caption, reply_markup=markup)
     except Exception:
-        await update.message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
+        try:
+            await update.message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
+        except Exception:
+            # Если отправка медиа не удалась, хотя бы приветствуем текстом
+            await update.message.reply_text(text=caption, reply_markup=markup)
 
 # ---------- Aiohttp health ----------
 async def health(_: web.Request) -> web.Response:
