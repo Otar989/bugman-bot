@@ -28,15 +28,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Жми «Играть» — Mini App откроется внутри Telegram."
     )
 
+    chat_id = update.effective_chat.id
+    message = update.effective_message
+
     # Пытаемся как GIF, если не выйдет — как фото (например, в десктоп-клиенте)
     try:
-        await update.message.reply_animation(animation=MEDIA_URL, caption=caption, reply_markup=markup)
+        if message:
+            await message.reply_animation(animation=MEDIA_URL, caption=caption, reply_markup=markup)
+        else:
+            await context.bot.send_animation(chat_id=chat_id, animation=MEDIA_URL, caption=caption, reply_markup=markup)
     except Exception:
         try:
-            await update.message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
+            if message:
+                await message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
+            else:
+                await context.bot.send_photo(chat_id=chat_id, photo=MEDIA_URL, caption=caption, reply_markup=markup)
         except Exception:
             # Если отправка медиа не удалась, хотя бы приветствуем текстом
-            await update.message.reply_text(text=caption, reply_markup=markup)
+            if message:
+                await message.reply_text(text=caption, reply_markup=markup)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup)
 
 # ---------- Aiohttp health ----------
 async def health(_: web.Request) -> web.Response:
