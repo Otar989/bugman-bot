@@ -24,10 +24,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     markup = InlineKeyboardMarkup(kb)
     caption = "👾 Привет! Добро пожаловать в Bugman!\n\nЖми «Играть» — Mini App откроется внутри Telegram."
 
+    send_kwargs = {
+        "chat_id": update.effective_chat.id,
+        "caption": caption,
+        "reply_markup": markup,
+    }
+
     try:
-        await update.message.reply_animation(animation=MEDIA_URL, caption=caption, reply_markup=markup)
+        await context.bot.send_animation(animation=MEDIA_URL, **send_kwargs)
     except Exception:
-        await update.message.reply_photo(photo=MEDIA_URL, caption=caption, reply_markup=markup)
+        await context.bot.send_photo(photo=MEDIA_URL, **send_kwargs)
 
 def run_bot():
     app = ApplicationBuilder().token(TOKEN).build()
