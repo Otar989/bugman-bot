@@ -19,7 +19,8 @@ uvicorn server:app --host 0.0.0.0 --port $PORT --reload
 ```
 
 Для успешной проверки подписи `BOT_TOKEN`/`BOT_TOKENS` должны соответствовать тому
-боту, из которого открывается Mini App.
+боту, из которого открывается Mini App. Строка для подписи строится из декодированных
+значений, как в `parse_qsl`.
 
 ## Deploy on Render
 
@@ -35,12 +36,18 @@ server will be reachable at the URL provided by Render, e.g.
 
 ## Troubleshooting
 
-When `DEBUG=true` in your `.env`, you can verify raw init data:
+When `DEBUG=true` in your `.env`, you can verify init data:
 
 ```bash
-curl -X POST http://localhost:8080/debug/verify \
-  -H 'Content-Type: application/json' \
-  -d '{"initData":"<real-init-data>"}'
+curl -G http://localhost:8080/auth_check --data-urlencode "initData=<real-init-data>"
+```
+
+To inspect the string used for signing:
+
+```bash
+curl -G http://localhost:8080/auth_check \
+  --data-urlencode "initData=<real-init-data>" \
+  --data-urlencode "echo=1"
 ```
 
 Example error responses from `/score`:

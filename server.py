@@ -8,6 +8,7 @@ import json
 import os
 from datetime import datetime
 from os import getenv
+from urllib.parse import parse_qsl
 
 import aiosqlite
 from fastapi import FastAPI, Request
@@ -61,49 +62,41 @@ class ScoreIn(BaseModel):
     score: int
 
 
-class InitDataIn(BaseModel):
-    initData: str
+
+def get_tokens() -> list[str]:
+    env_tokens = os.getenv("BOT_TOKENS")
+    if env_tokens:
+        return [t.strip() for t in env_tokens.split(",") if t.strip()]
+    t = os.getenv("BOT_TOKEN")
+    return [t] if t else []
 
 
-def check_telegram_auth_raw(init_data: str, tokens: list[str]) -> Tuple[bool, Optional[dict], str]:
+def check_telegram_auth(init_data: str, tokens: list[str]) -> Tuple[bool, Optional[dict], str, str]:
     try:
-        # 1) Разбираем "сырые" пары без URL‑декодирования
-        #    НЕЛЬЗЯ применять unquote_plus до расчёта подписи.
-        raw_pairs = init_data.split("&")
-        recv_hash = None
-        kv_raw = []
-        for p in raw_pairs:
-            if not p:
-                continue
-            if p.startswith("hash="):
-                recv_hash = p.split("=", 1)[1]
-            else:
-                kv_raw.append(p)  # ключ=значение как есть
-
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True, strict_parsing=False))
+        recv_hash = pairs.pop("hash", None)
         if not recv_hash:
-            return False, None, "no_hash"
-
-        # 2) Отсортировать по ключу (часть до '=') лексикографически
-        kv_raw.sort(key=lambda s: s.split("=", 1)[0])
-
-        # 3) Собрать data_check_string из "сырых" пар через \n
-        data_check_string = "\n".join(kv_raw)
-
-        # 4) user нужно распарсить уже ПОСЛЕ вычисления подписи
-        #    но для самого хеша используем сырую строку; тут вытащим 'user=' ещё раз
-        user_raw = next((s.split("=",1)[1] for s in kv_raw if s.split("=",1)[0] == "user"), None)
-
-        # 5) Пробуем каждый токен
+            return False, None, "no_hash", ""
+        data_check_string = "\n".join(
+            f"{k}={pairs[k]}" for k in sorted(pairs.keys())
+        )
         for t in tokens:
             secret_key = hmac.new(b"WebAppData", t.encode(), hashlib.sha256).digest()
-            calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-            if hmac.compare_digest(calc_hash, recv_hash):
-                # подпись ок — теперь можно безопасно декодить user
-                user = json.loads(bytes(user_raw, "utf-8").decode("utf-8")) if user_raw else None
-                return True, user, "ok"
-        return False, None, "hash_mismatch"
+            calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+            if hmac.compare_digest(calc, recv_hash):
+                user_json = pairs.get("user")
+                if not user_json:
+                    return False, None, "no_user", data_check_string
+                try:
+                    user = json.loads(user_json)
+                except Exception:
+                    return False, None, "no_user", data_check_string
+                if "id" not in user:
+                    return False, None, "no_user", data_check_string
+                return True, user, "ok", data_check_string
+        return False, None, "hash_mismatch", data_check_string
     except Exception:
-        return False, None, "exception"
+        return False, None, "exception", ""
 
 
 @app.on_event("startup")
@@ -141,17 +134,9 @@ async def post_score(payload: ScoreIn, request: Request):
                 },
             )
 
-        tokens = []
-        env_tokens = os.getenv("BOT_TOKENS")
-        if env_tokens:
-            tokens = [t.strip() for t in env_tokens.split(",") if t.strip()]
-        else:
-            t = os.getenv("BOT_TOKEN")
-            if t:
-                tokens = [t]
-
-        ok, user, reason_resp = check_telegram_auth_raw(payload.initData, tokens)
-        if not ok or not user or "id" not in user:
+        tokens = get_tokens()
+        ok, user, reason_resp, _ = check_telegram_auth(payload.initData, tokens)
+        if not ok:
             status = 401
             reason = reason_resp
             return JSONResponse(
@@ -239,18 +224,15 @@ async def post_score(payload: ScoreIn, request: Request):
 
 
 if DEBUG:
-    @app.post("/debug/verify")
-    async def debug_verify(payload: InitDataIn):
-        tokens = []
-        env_tokens = os.getenv("BOT_TOKENS")
-        if env_tokens:
-            tokens = [t.strip() for t in env_tokens.split(",") if t.strip()]
-        else:
-            t = os.getenv("BOT_TOKEN")
-            if t:
-                tokens = [t]
-
-        ok, user, reason = check_telegram_auth_raw(payload.initData, tokens)
+    @app.get("/auth_check")
+    async def auth_check(initData: str, echo: str | None = None):
+        tokens = get_tokens()
+        ok, user, reason, data_check_string = check_telegram_auth(initData, tokens)
+        if echo == "1":
+            return {
+                "data_check_string": data_check_string,
+                "note": "for debugging only",
+            }
         if not ok:
             return JSONResponse(status_code=401, content={"ok": False, "error": reason})
         user_id = str(user.get("id"))
