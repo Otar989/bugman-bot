@@ -18,6 +18,9 @@ EOF
 uvicorn server:app --host 0.0.0.0 --port $PORT --reload
 ```
 
+Для успешной проверки подписи `BOT_TOKEN`/`BOT_TOKENS` должны соответствовать тому
+боту, из которого открывается Mini App.
+
 ## Deploy on Render
 
 The repository already contains a `Procfile` compatible with Render:
