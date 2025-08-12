@@ -151,10 +151,12 @@ async def post_score(payload: ScoreIn, request: Request):
         display_name = (
             username or first_name or last_name or f"Player {user_id[-4:]}"
         )
+        if len(display_name) > 24:
+            display_name = display_name[:23] + "…"
 
         now_dt = datetime.utcnow()
         last = LAST_SCORES.get(user_id)
-        if last and (now_dt - last).total_seconds() < 1:
+        if last and (now_dt - last).total_seconds() < 3:
             status = 429
             reason = "rate_limited"
             return JSONResponse(
@@ -174,8 +176,9 @@ async def post_score(payload: ScoreIn, request: Request):
             row = await cur.fetchone()
         prev_best = row[0] if row else 0
 
-        now = now_dt.isoformat()
-        if payload.score > prev_best:
+        best = prev_best
+        if row is None or payload.score > prev_best:
+            now = now_dt.isoformat()
             query = (
                 "INSERT INTO players (id, username, display_name, best_score, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
@@ -184,19 +187,9 @@ async def post_score(payload: ScoreIn, request: Request):
                 "best_score=excluded.best_score, updated_at=excluded.updated_at"
             )
             params = (user_id, username, display_name, payload.score, now)
+            await db.execute(query, params)
+            await db.commit()
             best = payload.score
-        else:
-            query = (
-                "INSERT INTO players (id, username, display_name, best_score, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET "
-                "username=excluded.username, display_name=excluded.display_name"
-            )
-            params = (user_id, username, display_name, prev_best, now)
-            best = prev_best
-
-        await db.execute(query, params)
-        await db.commit()
 
         me = {
             "id": user_id,
@@ -264,6 +257,20 @@ async def get_leaderboard(limit: int = 100, offset: int = 0):
         "SELECT display_name, username, best_score FROM players ORDER BY best_score DESC "
         "LIMIT ? OFFSET ?",
         (limit, offset),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    items = [
+        {"display_name": d, "username": u, "best_score": s} for d, u, s in rows
+    ]
+    return {"items": items}
+
+
+@app.get("/scoreboard")
+async def get_scoreboard():
+    db = app.state.db
+    async with db.execute(
+        "SELECT display_name, username, best_score FROM players ORDER BY best_score DESC LIMIT 100"
     ) as cur:
         rows = await cur.fetchall()
 
