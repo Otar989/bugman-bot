@@ -10,16 +10,22 @@ from os import getenv
 from urllib.parse import parse_qsl
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import logging
 
 
 load_dotenv()
 
 BOT_TOKEN = getenv("BOT_TOKEN", "")
 PORT = int(getenv("PORT", "8080"))
+DEBUG = getenv("DEBUG", "").lower() == "true"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("bugman")
 
 DATABASE = "leaderboard.db"
 
@@ -45,9 +51,18 @@ app.add_middleware(
 )
 
 
+@app.options("/score")
+async def options_score() -> Response:
+    return Response(status_code=204)
+
+
 class ScoreIn(BaseModel):
     initData: str
     score: int
+
+
+class InitDataIn(BaseModel):
+    initData: str
 
 
 def verify_init_data(init_data: str) -> dict | None:
@@ -56,12 +71,16 @@ def verify_init_data(init_data: str) -> dict | None:
     if not BOT_TOKEN:
         return None
 
-    data = dict(parse_qsl(init_data, strict_parsing=True))
+    try:
+        data = dict(parse_qsl(init_data, keep_blank_values=True))
+    except ValueError:
+        return None
+
     init_hash = data.pop("hash", None)
     if not init_hash:
         return None
 
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data))
     secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
     calculated_hash = hmac.new(
         secret_key, data_check_string.encode(), hashlib.sha256
@@ -85,60 +104,180 @@ async def shutdown() -> None:
     await app.state.db.close()
 
 
+LAST_SCORES: dict[str, datetime] = {}
+
+
 @app.post("/score")
-async def post_score(payload: ScoreIn):
-    data = verify_init_data(payload.initData)
-    if not data:
-        raise HTTPException(status_code=401, detail="Invalid initData")
+async def post_score(payload: ScoreIn, request: Request):
+    ip = request.client.host if request.client else "-"
+    user_id = "-"
+    reason = "ok"
+    status = 200
+    try:
+        if payload.initData is None or payload.score is None:
+            status = 400
+            reason = "missing initData or score"
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "bad_request",
+                    "reason": reason,
+                },
+            )
 
-    user_json = data.get("user")
-    if not user_json:
-        raise HTTPException(status_code=400, detail="User missing")
+        data = verify_init_data(payload.initData)
+        if not data:
+            status = 401
+            reason = "invalid_init_data"
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "invalid_init_data"},
+            )
 
-    user = json.loads(user_json)
-    user_id = str(user.get("id"))
-    username = user.get("username")
-    first_name = user.get("first_name")
-    display_name = username or first_name or f"Player {user_id[-4:]}"
+        user_json = data.get("user")
+        if not user_json:
+            status = 400
+            reason = "missing user"
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "bad_request",
+                    "reason": reason,
+                },
+            )
 
-    db = app.state.db
-    async with db.execute(
-        "SELECT best_score FROM players WHERE id = ?", (user_id,)
-    ) as cur:
-        row = await cur.fetchone()
-    prev_best = row[0] if row else 0
+        try:
+            user = json.loads(user_json)
+        except json.JSONDecodeError:
+            status = 400
+            reason = "invalid user"
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "bad_request",
+                    "reason": reason,
+                },
+            )
 
-    now = datetime.utcnow().isoformat()
-    if payload.score > prev_best:
-        query = (
-            "INSERT INTO players (id, username, display_name, best_score, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET "
-            "username=excluded.username, display_name=excluded.display_name, "
-            "best_score=excluded.best_score, updated_at=excluded.updated_at"
+        user_id = str(user.get("id"))
+        username = user.get("username")
+        first_name = user.get("first_name")
+        last_name = user.get("last_name")
+        display_name = (
+            username or first_name or last_name or f"Player {user_id[-4:]}"
         )
-        params = (user_id, username, display_name, payload.score, now)
-        best = payload.score
-    else:
-        query = (
-            "INSERT INTO players (id, username, display_name, best_score, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET "
-            "username=excluded.username, display_name=excluded.display_name"
+
+        now_dt = datetime.utcnow()
+        last = LAST_SCORES.get(user_id)
+        if last and (now_dt - last).total_seconds() < 1:
+            status = 429
+            reason = "rate_limited"
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "ok": False,
+                    "error": "too_many_requests",
+                    "reason": reason,
+                },
+            )
+        LAST_SCORES[user_id] = now_dt
+
+        db = app.state.db
+        async with db.execute(
+            "SELECT best_score FROM players WHERE id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        prev_best = row[0] if row else 0
+
+        now = now_dt.isoformat()
+        if payload.score > prev_best:
+            query = (
+                "INSERT INTO players (id, username, display_name, best_score, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "username=excluded.username, display_name=excluded.display_name, "
+                "best_score=excluded.best_score, updated_at=excluded.updated_at"
+            )
+            params = (user_id, username, display_name, payload.score, now)
+            best = payload.score
+        else:
+            query = (
+                "INSERT INTO players (id, username, display_name, best_score, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "username=excluded.username, display_name=excluded.display_name"
+            )
+            params = (user_id, username, display_name, prev_best, now)
+            best = prev_best
+
+        await db.execute(query, params)
+        await db.commit()
+
+        me = {
+            "id": user_id,
+            "display_name": display_name,
+            "username": username,
+            "best_score": best,
+        }
+        return {"ok": True, "me": me}
+    except Exception:
+        status = 500
+        reason = "server_error"
+        logger.exception("score handler error")
+        return JSONResponse(
+            status_code=500, content={"ok": False, "error": "server_error"}
         )
-        params = (user_id, username, display_name, prev_best, now)
-        best = prev_best
+    finally:
+        logger.info("%s %s user=%s reason=%s", ip, status, user_id, reason)
 
-    await db.execute(query, params)
-    await db.commit()
 
-    me = {
-        "id": user_id,
-        "display_name": display_name,
-        "username": username,
-        "best_score": best,
-    }
-    return {"ok": True, "me": me}
+if DEBUG:
+    @app.post("/debug/echo_user")
+    async def debug_echo_user(payload: InitDataIn):
+        data = verify_init_data(payload.initData)
+        if not data:
+            return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_init_data"})
+        user_json = data.get("user")
+        if not user_json:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "bad_request", "reason": "missing user"},
+            )
+        try:
+            user = json.loads(user_json)
+        except json.JSONDecodeError:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "bad_request", "reason": "invalid user"},
+            )
+        user_id = str(user.get("id"))
+        username = user.get("username")
+        first_name = user.get("first_name")
+        last_name = user.get("last_name")
+        display_name = username or first_name or last_name or f"Player {user_id[-4:]}"
+        return {
+            "ok": True,
+            "user": {
+                "id": user_id,
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+            },
+            "display_name": display_name,
+        }
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"ok": True}
+
+
+@app.get("/")
+async def root() -> dict:
+    return {"ok": True, "service": "bugman-bot"}
 
 
 @app.get("/leaderboard")
