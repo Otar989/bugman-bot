@@ -3,13 +3,8 @@ import asyncio
 import logging
 
 from aiohttp import web
-from telegram import (
-    FSInputFile,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-    WebAppInfo,
-)
+from telegram import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # ---------- Логи ----------
@@ -17,59 +12,46 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("bugman")
 
 # ---------- Конфиг ----------
-# В Render добавь переменные окружения: TOKEN (обяз.), APP_URL (опц.), MEDIA_URL (опц.)
+# В Render добавь переменную окружения TOKEN (обяз.)
 TOKEN = os.environ["TOKEN"]
-APP_URL = os.environ.get("APP_URL", "https://otar989.github.io/bugman-miniapp-/")
-# По умолчанию используем локальный GIF, чтобы стартовое сообщение всегда отправлялось
-MEDIA_URL = os.environ.get("MEDIA_URL", "bugman.gif")
 
 # ---------- Telegram-handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("🎮 Играть", web_app=WebAppInfo(url=APP_URL))]]
-    markup = InlineKeyboardMarkup(kb)
-    caption = (
-        "👾 Привет! Добро пожаловать в Bugman!\n\n"
-        "Жми «Играть» — Mini App откроется внутри Telegram."
-    )
+    """Handler for /start command.
+
+    Always sends the Bugman GIF followed by a welcome message with an
+    inline button linking to the game.
+    """
 
     chat_id = update.effective_chat.id
-    message = update.effective_message
 
-    def _get_media():
-        return FSInputFile(MEDIA_URL) if os.path.exists(MEDIA_URL) else MEDIA_URL
-
-    # Пытаемся как GIF, если не выйдет — как фото (например, в десктоп-клиенте)
+    # Сначала отправляем GIF. Если не получится, просто логируем ошибку.
     try:
-        media = _get_media()
-        if message:
-            await message.reply_animation(animation=media, caption=caption, reply_markup=markup)
-        else:
-            await context.bot.send_animation(
-                chat_id=chat_id,
-                animation=media,
-                caption=caption,
-                reply_markup=markup,
-            )
+        await context.bot.send_animation(
+            chat_id=chat_id, animation=FSInputFile("bugman.gif")
+        )
     except Exception:
-        try:
-            media = _get_media()
-            if message:
-                await message.reply_photo(photo=media, caption=caption, reply_markup=markup)
-            else:
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=media,
-                    caption=caption,
-                    reply_markup=markup,
-                )
-        except Exception:
-            # Если отправка медиа не удалась, хотя бы приветствуем текстом
-            if message:
-                await message.reply_text(text=caption, reply_markup=markup)
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id, text=caption, reply_markup=markup
-                )
+        log.exception("Failed to send start GIF")
+
+    # Текст сообщения в формате Markdown
+    text = (
+        "🤖 Привет! Это *Bugman*.\n"
+        "Ты — жёлтый, они — злые, монетки — вкусные.\n\n"
+        "Выживи как можно дольше и стань легендой!\n"
+        "Осторожно: игра вызывает привыкание 😎\n\n"
+        "🎯 Жми «Играть» и докажи, что ты главный в этом лабиринте."
+    )
+
+    # Инлайн-кнопка с ссылкой на игру
+    kb = [[InlineKeyboardButton("🎮 Играть", url="https://t.me/bugman_bot/myapp")]]
+    markup = InlineKeyboardMarkup(kb)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=markup,
+    )
 
 # ---------- Aiohttp health ----------
 async def health(_: web.Request) -> web.Response:
