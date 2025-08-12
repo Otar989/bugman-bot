@@ -29,6 +29,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bugman")
 
 DATABASE = "leaderboard.db"
+RATE_LIMIT_SECONDS = 4
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS players (
@@ -154,22 +155,30 @@ async def post_score(payload: ScoreIn, request: Request):
         if len(display_name) > 24:
             display_name = display_name[:23] + "…"
 
+        db = app.state.db
         now_dt = datetime.utcnow()
         last = LAST_SCORES.get(user_id)
-        if last and (now_dt - last).total_seconds() < 3:
-            status = 429
+        if last and (now_dt - last).total_seconds() < RATE_LIMIT_SECONDS:
             reason = "rate_limited"
+            async with db.execute(
+                "SELECT best_score FROM players WHERE id = ?", (user_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            best = row[0] if row else 0
+            me = {
+                "id": user_id,
+                "display_name": display_name,
+                "username": username,
+                "best_score": best,
+            }
+            headers = {"Retry-After": str(RATE_LIMIT_SECONDS)}
             return JSONResponse(
-                status_code=429,
-                content={
-                    "ok": False,
-                    "error": "too_many_requests",
-                    "reason": reason,
-                },
+                status_code=200,
+                content={"ok": True, "rate_limited": True, "me": me},
+                headers=headers,
             )
         LAST_SCORES[user_id] = now_dt
 
-        db = app.state.db
         async with db.execute(
             "SELECT best_score FROM players WHERE id = ?", (user_id,)
         ) as cur:
