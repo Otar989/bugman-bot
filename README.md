@@ -6,7 +6,15 @@ FastAPI server providing a global leaderboard for the Bugman Telegram mini game.
 
 ```
 pip install -r requirements.txt
-echo -e "BOT_TOKEN=<твой токен>\nPORT=8080" > .env
+# create .env with your bot token(s)
+cat > .env <<'EOF'
+# one token
+BOT_TOKEN=123:ABC
+# or multiple (comma-separated)
+BOT_TOKENS=123:ABC,456:DEF
+PORT=8080
+DEBUG=true
+EOF
 uvicorn server:app --host 0.0.0.0 --port $PORT --reload
 ```
 
@@ -24,10 +32,10 @@ server will be reachable at the URL provided by Render, e.g.
 
 ## Troubleshooting
 
-When `DEBUG=true` in your `.env`, you can inspect parsed user data:
+When `DEBUG=true` in your `.env`, you can verify raw init data:
 
 ```bash
-curl -X POST http://localhost:8080/debug/echo_user \
+curl -X POST http://localhost:8080/debug/verify \
   -H 'Content-Type: application/json' \
   -d '{"initData":"<real-init-data>"}'
 ```

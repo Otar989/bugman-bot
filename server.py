@@ -7,7 +7,7 @@ import hmac
 import json
 from datetime import datetime
 from os import getenv
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, unquote_plus
 
 import aiosqlite
 from fastapi import FastAPI, Request
@@ -20,7 +20,16 @@ import logging
 
 load_dotenv()
 
+# read tokens: BOT_TOKENS is optional comma-separated list
+# if absent, fall back to single BOT_TOKEN
 BOT_TOKEN = getenv("BOT_TOKEN", "")
+_tokens_raw = getenv("BOT_TOKENS")
+if _tokens_raw:
+    BOT_TOKENS = [t.strip() for t in _tokens_raw.split(",") if t.strip()]
+elif BOT_TOKEN:
+    BOT_TOKENS = [BOT_TOKEN]
+else:
+    BOT_TOKENS = []
 PORT = int(getenv("PORT", "8080"))
 DEBUG = getenv("DEBUG", "").lower() == "true"
 
@@ -65,31 +74,30 @@ class InitDataIn(BaseModel):
     initData: str
 
 
-def verify_init_data(init_data: str) -> dict | None:
-    """Validate Telegram WebApp initData string."""
-
-    if not BOT_TOKEN:
-        return None
+def check_telegram_auth(init_data: str, tokens: list[str]) -> tuple[bool, dict | None, str | None, int | None]:
+    """Validate Telegram WebApp initData string with multiple bot tokens."""
 
     try:
-        data = dict(parse_qsl(init_data, keep_blank_values=True))
-    except ValueError:
-        return None
-
-    init_hash = data.pop("hash", None)
-    if not init_hash:
-        return None
-
-    data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data))
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    calculated_hash = hmac.new(
-        secret_key, data_check_string.encode(), hashlib.sha256
-    ).hexdigest()
-
-    if not hmac.compare_digest(calculated_hash, init_hash):
-        return None
-
-    return data
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        recv_hash = pairs.pop("hash", None)
+        if not recv_hash:
+            return False, None, "no_hash", None
+        kv = []
+        for k in sorted(pairs.keys()):
+            kv.append(f"{k}={pairs[k]}")
+        dcs = "\n".join(kv)
+        user_raw = pairs.get("user")
+        user = json.loads(unquote_plus(user_raw)) if user_raw else None
+        if not user or "id" not in user:
+            return False, None, "no_user", None
+        for idx, t in enumerate(tokens, start=1):
+            secret = hmac.new(b"WebAppData", t.encode(), hashlib.sha256).digest()
+            calc = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
+            if hmac.compare_digest(calc, recv_hash):
+                return True, user, None, idx
+        return False, None, "hash_mismatch", None
+    except Exception:
+        return False, None, "exception", None
 
 
 @app.on_event("startup")
@@ -113,6 +121,7 @@ async def post_score(payload: ScoreIn, request: Request):
     user_id = "-"
     reason = "ok"
     status = 200
+    init_len = len(payload.initData) if payload.initData else 0
     try:
         if payload.initData is None or payload.score is None:
             status = 400
@@ -126,40 +135,13 @@ async def post_score(payload: ScoreIn, request: Request):
                 },
             )
 
-        data = verify_init_data(payload.initData)
-        if not data:
+        ok, user, err, _token_idx = check_telegram_auth(payload.initData, BOT_TOKENS)
+        if not ok:
             status = 401
-            reason = "invalid_init_data"
+            reason = err or "invalid_init_data"
             return JSONResponse(
                 status_code=401,
                 content={"ok": False, "error": "invalid_init_data"},
-            )
-
-        user_json = data.get("user")
-        if not user_json:
-            status = 400
-            reason = "missing user"
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "error": "bad_request",
-                    "reason": reason,
-                },
-            )
-
-        try:
-            user = json.loads(user_json)
-        except json.JSONDecodeError:
-            status = 400
-            reason = "invalid user"
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "error": "bad_request",
-                    "reason": reason,
-                },
             )
 
         user_id = str(user.get("id"))
@@ -231,43 +213,32 @@ async def post_score(payload: ScoreIn, request: Request):
             status_code=500, content={"ok": False, "error": "server_error"}
         )
     finally:
-        logger.info("%s %s user=%s reason=%s", ip, status, user_id, reason)
+        logger.info(
+            "%s %s user=%s reason=%s init_len=%s",
+            ip,
+            status,
+            user_id,
+            reason,
+            init_len,
+        )
 
 
 if DEBUG:
-    @app.post("/debug/echo_user")
-    async def debug_echo_user(payload: InitDataIn):
-        data = verify_init_data(payload.initData)
-        if not data:
-            return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_init_data"})
-        user_json = data.get("user")
-        if not user_json:
-            return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": "bad_request", "reason": "missing user"},
-            )
-        try:
-            user = json.loads(user_json)
-        except json.JSONDecodeError:
-            return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": "bad_request", "reason": "invalid user"},
-            )
+    @app.post("/debug/verify")
+    async def debug_verify(payload: InitDataIn):
+        ok, user, err, token_idx = check_telegram_auth(payload.initData, BOT_TOKENS)
+        if not ok:
+            return JSONResponse(status_code=401, content={"ok": False, "error": err})
         user_id = str(user.get("id"))
         username = user.get("username")
         first_name = user.get("first_name")
         last_name = user.get("last_name")
         display_name = username or first_name or last_name or f"Player {user_id[-4:]}"
-        return {
-            "ok": True,
-            "user": {
-                "id": user_id,
-                "username": username,
-                "first_name": first_name,
-                "last_name": last_name,
-            },
-            "display_name": display_name,
-        }
+        note = f"verified via token #{token_idx}" if token_idx else None
+        resp = {"ok": True, "user": user, "display_name": display_name}
+        if note:
+            resp["note"] = note
+        return resp
 
 
 @app.get("/health")
