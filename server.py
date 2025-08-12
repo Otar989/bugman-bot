@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from datetime import datetime
 from os import getenv
-from urllib.parse import parse_qsl, unquote_plus
 
 import aiosqlite
 from fastapi import FastAPI, Request
@@ -16,20 +16,11 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import logging
+from typing import Tuple, Optional
 
 
 load_dotenv()
 
-# read tokens: BOT_TOKENS is optional comma-separated list
-# if absent, fall back to single BOT_TOKEN
-BOT_TOKEN = getenv("BOT_TOKEN", "")
-_tokens_raw = getenv("BOT_TOKENS")
-if _tokens_raw:
-    BOT_TOKENS = [t.strip() for t in _tokens_raw.split(",") if t.strip()]
-elif BOT_TOKEN:
-    BOT_TOKENS = [BOT_TOKEN]
-else:
-    BOT_TOKENS = []
 PORT = int(getenv("PORT", "8080"))
 DEBUG = getenv("DEBUG", "").lower() == "true"
 
@@ -74,30 +65,45 @@ class InitDataIn(BaseModel):
     initData: str
 
 
-def check_telegram_auth(init_data: str, tokens: list[str]) -> tuple[bool, dict | None, str | None, int | None]:
-    """Validate Telegram WebApp initData string with multiple bot tokens."""
-
+def check_telegram_auth_raw(init_data: str, tokens: list[str]) -> Tuple[bool, Optional[dict], str]:
     try:
-        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
-        recv_hash = pairs.pop("hash", None)
+        # 1) Разбираем "сырые" пары без URL‑декодирования
+        #    НЕЛЬЗЯ применять unquote_plus до расчёта подписи.
+        raw_pairs = init_data.split("&")
+        recv_hash = None
+        kv_raw = []
+        for p in raw_pairs:
+            if not p:
+                continue
+            if p.startswith("hash="):
+                recv_hash = p.split("=", 1)[1]
+            else:
+                kv_raw.append(p)  # ключ=значение как есть
+
         if not recv_hash:
-            return False, None, "no_hash", None
-        kv = []
-        for k in sorted(pairs.keys()):
-            kv.append(f"{k}={pairs[k]}")
-        dcs = "\n".join(kv)
-        user_raw = pairs.get("user")
-        user = json.loads(unquote_plus(user_raw)) if user_raw else None
-        if not user or "id" not in user:
-            return False, None, "no_user", None
-        for idx, t in enumerate(tokens, start=1):
-            secret = hmac.new(b"WebAppData", t.encode(), hashlib.sha256).digest()
-            calc = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
-            if hmac.compare_digest(calc, recv_hash):
-                return True, user, None, idx
-        return False, None, "hash_mismatch", None
+            return False, None, "no_hash"
+
+        # 2) Отсортировать по ключу (часть до '=') лексикографически
+        kv_raw.sort(key=lambda s: s.split("=", 1)[0])
+
+        # 3) Собрать data_check_string из "сырых" пар через \n
+        data_check_string = "\n".join(kv_raw)
+
+        # 4) user нужно распарсить уже ПОСЛЕ вычисления подписи
+        #    но для самого хеша используем сырую строку; тут вытащим 'user=' ещё раз
+        user_raw = next((s.split("=",1)[1] for s in kv_raw if s.split("=",1)[0] == "user"), None)
+
+        # 5) Пробуем каждый токен
+        for t in tokens:
+            secret_key = hmac.new(b"WebAppData", t.encode(), hashlib.sha256).digest()
+            calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+            if hmac.compare_digest(calc_hash, recv_hash):
+                # подпись ок — теперь можно безопасно декодить user
+                user = json.loads(bytes(user_raw, "utf-8").decode("utf-8")) if user_raw else None
+                return True, user, "ok"
+        return False, None, "hash_mismatch"
     except Exception:
-        return False, None, "exception", None
+        return False, None, "exception"
 
 
 @app.on_event("startup")
@@ -135,13 +141,22 @@ async def post_score(payload: ScoreIn, request: Request):
                 },
             )
 
-        ok, user, err, _token_idx = check_telegram_auth(payload.initData, BOT_TOKENS)
-        if not ok:
+        tokens = []
+        env_tokens = os.getenv("BOT_TOKENS")
+        if env_tokens:
+            tokens = [t.strip() for t in env_tokens.split(",") if t.strip()]
+        else:
+            t = os.getenv("BOT_TOKEN")
+            if t:
+                tokens = [t]
+
+        ok, user, reason_resp = check_telegram_auth_raw(payload.initData, tokens)
+        if not ok or not user or "id" not in user:
             status = 401
-            reason = err or "invalid_init_data"
+            reason = reason_resp
             return JSONResponse(
+                {"ok": False, "error": "invalid_init_data", "reason": reason_resp},
                 status_code=401,
-                content={"ok": False, "error": "invalid_init_data"},
             )
 
         user_id = str(user.get("id"))
@@ -226,18 +241,24 @@ async def post_score(payload: ScoreIn, request: Request):
 if DEBUG:
     @app.post("/debug/verify")
     async def debug_verify(payload: InitDataIn):
-        ok, user, err, token_idx = check_telegram_auth(payload.initData, BOT_TOKENS)
+        tokens = []
+        env_tokens = os.getenv("BOT_TOKENS")
+        if env_tokens:
+            tokens = [t.strip() for t in env_tokens.split(",") if t.strip()]
+        else:
+            t = os.getenv("BOT_TOKEN")
+            if t:
+                tokens = [t]
+
+        ok, user, reason = check_telegram_auth_raw(payload.initData, tokens)
         if not ok:
-            return JSONResponse(status_code=401, content={"ok": False, "error": err})
+            return JSONResponse(status_code=401, content={"ok": False, "error": reason})
         user_id = str(user.get("id"))
         username = user.get("username")
         first_name = user.get("first_name")
         last_name = user.get("last_name")
         display_name = username or first_name or last_name or f"Player {user_id[-4:]}"
-        note = f"verified via token #{token_idx}" if token_idx else None
         resp = {"ok": True, "user": user, "display_name": display_name}
-        if note:
-            resp["note"] = note
         return resp
 
 
